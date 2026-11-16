@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.sp
 import com.echo.hearing.data.UserProfile
 import com.echo.hearing.domain.model.HearingSessionRecord
 import com.echo.hearing.monitor.MonitorUiState
+import com.echo.hearing.volume.*
 import com.echo.hearing.ui.components.*
 import com.echo.hearing.ui.theme.*
 import com.google.gson.GsonBuilder
@@ -40,10 +41,12 @@ fun HomeScreen(
     profile: UserProfile,
     screeningState: HearingScreeningUiState,
     monitorState: MonitorUiState,
+    volumeTracking: Boolean = false,
     initialTestPending: Boolean = false,
     onStartInitialTest: () -> Unit = {},
     onNavigateToTest: () -> Unit,
     onNavigateToMonitor: () -> Unit,
+    onNavigateToAid: () -> Unit = {},
     onNavigateToReports: () -> Unit,
     onOpenScreeningHistory: () -> Unit
 ) {
@@ -57,11 +60,11 @@ fun HomeScreen(
             title = "ECHO",
             actions = {
                 EchoStatusPill(
-                    label = if (monitorState.running) "Monitor Live" else "Ready",
-                    icon = if (monitorState.running) Icons.Filled.GraphicEq else Icons.Outlined.CheckCircle,
-                    containerColor = if (monitorState.running) EmeraldSoft else EchoSurfaceAlt,
-                    borderColor = if (monitorState.running) Emerald500 else EchoPillBorder,
-                    contentColor = if (monitorState.running) Emerald500 else EchoPrimary
+                    label = if (volumeTracking) "Tracking volume" else "Ready",
+                    icon = if (volumeTracking) Icons.Filled.GraphicEq else Icons.Outlined.CheckCircle,
+                    containerColor = if (volumeTracking) EmeraldSoft else EchoSurfaceAlt,
+                    borderColor = if (volumeTracking) Emerald500 else EchoPillBorder,
+                    contentColor = if (volumeTracking) Emerald500 else EchoPrimary
                 )
             }
         )
@@ -75,7 +78,7 @@ fun HomeScreen(
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
-                    text = "Welcome back, ${profile.preferredName}",
+                    text = if (profile.preferredName.isBlank()) "Welcome back" else "Welcome back, ${profile.preferredName}",
                     color = EchoNavy,
                     fontSize = 23.sp,
                     fontWeight = FontWeight.Bold
@@ -133,8 +136,8 @@ fun HomeScreen(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Live Audio Monitor: ${if (monitorState.running) "Active · ${if (monitorState.processed) "ECHO DSP On" else "Baseline"}" else "Stopped"}",
-                    color = if (monitorState.running) Emerald500 else EchoTextMuted,
+                    text = "Volume tracking: ${if (volumeTracking) "On, recording in the background" else "Off"}",
+                    color = if (volumeTracking) Emerald500 else EchoTextMuted,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium
                 )
@@ -151,10 +154,18 @@ fun HomeScreen(
 
             HomeActionCard(
                 icon = Icons.Outlined.GraphicEq,
-                title = "Live Audio Monitor & DSP",
-                description = "Real-time Oboe full-duplex monitor with noise gate, adaptive denoiser, 4-band compression & 6-band EQ.",
-                buttonText = "Open Sound Monitor",
+                title = "Phone Volume Monitor",
+                description = "Tracks your phone volume and listening time in the background, with daily and weekly analytics.",
+                buttonText = "Open Volume Monitor",
                 onClick = onNavigateToMonitor
+            )
+
+            HomeActionCard(
+                icon = Icons.Outlined.Headphones,
+                title = if (monitorState.running) "Hearing Aid · On" else "Hearing Aid",
+                description = "Hear your surroundings through your earbuds with speech processing, noise reduction and per-ear EQ. Keeps running in the background.",
+                buttonText = if (monitorState.running) "Open Hearing Aid" else "Start Hearing Aid",
+                onClick = onNavigateToAid
             )
 
             HomeActionCard(
@@ -209,11 +220,13 @@ private enum class ReportsSubScreen {
     HISTORICAL_DATA
 }
 
+/** Reports tab. Everything here is computed from data recorded on this phone. */
 @Composable
 fun ReportsScreen(
     screeningState: HearingScreeningUiState,
-    monitorState: MonitorUiState,
-    onOpenScreeningHistory: () -> Unit
+    volume: VolumeUiState,
+    onOpenScreeningHistory: () -> Unit,
+    onOpenMonitor: () -> Unit
 ) {
     var subScreen by remember { mutableStateOf(ReportsSubScreen.MAIN) }
 
@@ -225,7 +238,8 @@ fun ReportsScreen(
         when (subScreen) {
             ReportsSubScreen.MAIN -> ReportsMainScreen(
                 screeningState = screeningState,
-                monitorState = monitorState,
+                volume = volume,
+                onOpenMonitor = onOpenMonitor,
                 onWeeklyReport = { subScreen = ReportsSubScreen.WEEKLY_REPORT },
                 onExposureTrends = { subScreen = ReportsSubScreen.EXPOSURE_TRENDS },
                 onInsights = { subScreen = ReportsSubScreen.INSIGHTS_TIPS },
@@ -233,22 +247,25 @@ fun ReportsScreen(
             )
 
             ReportsSubScreen.WEEKLY_REPORT -> WeeklyReportSubScreen(
+                volume = volume,
                 screeningCount = screeningState.savedSessions.size,
-                clarityCount = monitorState.trials.size,
                 onBack = { subScreen = ReportsSubScreen.MAIN }
             )
 
             ReportsSubScreen.EXPOSURE_TRENDS -> ExposureTrendsSubScreen(
+                volume = volume,
                 onBack = { subScreen = ReportsSubScreen.MAIN }
             )
 
             ReportsSubScreen.INSIGHTS_TIPS -> InsightsTipsSubScreen(
+                volume = volume,
+                screeningState = screeningState,
                 onBack = { subScreen = ReportsSubScreen.MAIN }
             )
 
             ReportsSubScreen.HISTORICAL_DATA -> HistoricalDataSubScreen(
                 sessions = screeningState.savedSessions,
-                clarityTrials = monitorState.trials,
+                volume = volume,
                 onOpenScreeningHistory = onOpenScreeningHistory,
                 onBack = { subScreen = ReportsSubScreen.MAIN }
             )
@@ -256,19 +273,61 @@ fun ReportsScreen(
     }
 }
 
+private fun weekSummary(volume: VolumeUiState): VolumeSummary? {
+    val week = volume.week
+    if (week.isEmpty()) return null
+    val listening = week.sumOf { it.listeningMs }
+    if (listening == 0L) return VolumeSummary(week.first().from, week.last().to)
+    return VolumeSummary(
+        from = week.first().from,
+        to = week.last().to,
+        listeningMs = listening,
+        avgPercent = Math.round(week.sumOf { it.avgPercent.toDouble() * it.listeningMs } / listening).toInt(),
+        peakPercent = week.maxOf { it.peakPercent },
+        highMs = week.sumOf { it.highMs }
+    )
+}
+
+@Composable
+private fun NoVolumeDataCard(volume: VolumeUiState, onOpenMonitor: (() -> Unit)?) {
+    EchoCard(borderColor = EchoPillBorder, containerColor = EchoSurfaceAlt) {
+        Text(
+            if (volume.tracking) "Tracking is on. No listening recorded yet." else "Volume tracking is off.",
+            color = EchoNavy, fontSize = 15.sp, fontWeight = FontWeight.Bold
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            if (volume.tracking) "Play music or video and your listening will show up here."
+            else "Turn on tracking in the Monitor tab to record your listening volume.",
+            color = EchoTextMuted, fontSize = 13.sp, lineHeight = 18.sp
+        )
+        if (onOpenMonitor != null && !volume.tracking) {
+            Spacer(modifier = Modifier.height(10.dp))
+            EchoPrimaryButton(text = "Open Monitor", icon = Icons.Outlined.GraphicEq, onClick = onOpenMonitor)
+        }
+    }
+}
+
 @Composable
 private fun ReportsMainScreen(
     screeningState: HearingScreeningUiState,
-    monitorState: MonitorUiState,
+    volume: VolumeUiState,
+    onOpenMonitor: () -> Unit,
     onWeeklyReport: () -> Unit,
     onExposureTrends: () -> Unit,
     onInsights: () -> Unit,
     onHistoricalData: () -> Unit
 ) {
+    val week = weekSummary(volume)
     Column(modifier = Modifier.fillMaxSize()) {
         EchoTopBar(
             title = "Listening Reports",
-            actions = { EchoStatusPill(label = "Sample data") }
+            actions = {
+                EchoStatusPill(
+                    label = if (volume.tracking) "Live" else "Tracking off",
+                    icon = if (volume.tracking) Icons.Filled.GraphicEq else Icons.Outlined.PauseCircle
+                )
+            }
         )
 
         Column(
@@ -278,68 +337,54 @@ private fun ReportsMainScreen(
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Weekly Summary Card (Image 1)
             EchoCard {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Weekly Summary", color = EchoNavy, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                    EchoStatusPill(label = "Sample data")
-                }
+                Text("This Week", color = EchoNavy, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(10.dp))
-                Text(
-                    text = "Your listening habits remained 100% within recommended sound limits this week.",
-                    color = EchoTextMuted,
-                    fontSize = 14.5.sp,
-                    lineHeight = 21.sp
-                )
-                if (screeningState.savedSessions.isNotEmpty() || monitorState.trials.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(8.dp))
+                if (week == null || week.listeningMs == 0L) {
+                    Text("No listening recorded in the last 7 days.", color = EchoTextMuted, fontSize = 14.sp)
+                } else {
                     Text(
-                        text = "Saved on device: ${screeningState.savedSessions.size} screening session(s) · ${monitorState.trials.size} speech clarity trial(s).",
-                        color = EchoPrimary,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.Medium
+                        "${formatDuration(week.listeningMs)} of listening at an average volume of ${week.avgPercent}% " +
+                            "(peak ${week.peakPercent}%).",
+                        color = EchoNavy, fontSize = 14.5.sp, lineHeight = 21.sp
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    val highShare = (week.highMs * 100 / week.listeningMs).toInt()
+                    Text(
+                        if (week.highMs == 0L) "None of it was at ${VolumeAnalytics.HIGH_PERCENT}% volume or more."
+                        else "${formatDuration(week.highMs)} ($highShare%) was at ${VolumeAnalytics.HIGH_PERCENT}% volume or more.",
+                        color = if (week.highMs == 0L) Emerald500 else Rose500,
+                        fontSize = 13.5.sp, fontWeight = FontWeight.Medium
                     )
                 }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "Saved screenings: ${screeningState.savedSessions.size}",
+                    color = EchoPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Medium
+                )
             }
 
-            // Four signature pill buttons from Image 1
-            EchoOutlinedPillButton(
-                text = "Weekly Report",
-                icon = Icons.Outlined.ViewWeek,
-                onClick = onWeeklyReport
-            )
-            EchoOutlinedPillButton(
-                text = "Exposure Trends",
-                icon = Icons.AutoMirrored.Filled.TrendingUp,
-                onClick = onExposureTrends
-            )
-            EchoOutlinedPillButton(
-                text = "Insights & Tips",
-                icon = Icons.Outlined.Lightbulb,
-                onClick = onInsights
-            )
-            EchoOutlinedPillButton(
-                text = "Historical Data",
-                icon = Icons.Outlined.History,
-                onClick = onHistoricalData
-            )
+            if (volume.loaded && volume.firstRecordAt == null) NoVolumeDataCard(volume, onOpenMonitor)
+
+            EchoOutlinedPillButton(text = "Weekly Report", icon = Icons.Outlined.ViewWeek, onClick = onWeeklyReport)
+            EchoOutlinedPillButton(text = "Exposure Trends", icon = Icons.AutoMirrored.Filled.TrendingUp, onClick = onExposureTrends)
+            EchoOutlinedPillButton(text = "Insights & Tips", icon = Icons.Outlined.Lightbulb, onClick = onInsights)
+            EchoOutlinedPillButton(text = "Historical Data", icon = Icons.Outlined.History, onClick = onHistoricalData)
         }
     }
 }
 
 @Composable
 private fun WeeklyReportSubScreen(
+    volume: VolumeUiState,
     screeningCount: Int,
-    clarityCount: Int,
     onBack: () -> Unit
 ) {
-    val days = listOf("Mon" to 0.35f, "Tue" to 0.50f, "Wed" to 0.42f, "Thu" to 0.60f, "Fri" to 0.48f, "Sat" to 0.30f, "Sun" to 0.25f)
+    val dayFmt = remember { java.text.SimpleDateFormat("EEE", java.util.Locale.getDefault()) }
+    val maxMs = (volume.week.maxOfOrNull { it.listeningMs } ?: 0L).coerceAtLeast(60_000L)
+    val week = weekSummary(volume)
     Column(modifier = Modifier.fillMaxSize()) {
-        EchoTopBar(title = "Weekly Report", onBack = onBack, actions = { EchoStatusPill(label = "Sample data") })
+        EchoTopBar(title = "Weekly Report", onBack = onBack)
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -348,42 +393,66 @@ private fun WeeklyReportSubScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             EchoCard {
-                Text("Weekly Safe Listening Budget (Sample)", color = EchoNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text("Listening time per day", color = EchoNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text("Last 7 days", color = EchoTextMuted, fontSize = 12.5.sp)
                 Spacer(modifier = Modifier.height(12.dp))
                 Row(
-                    modifier = Modifier.fillMaxWidth().height(120.dp),
+                    modifier = Modifier.fillMaxWidth().height(130.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.Bottom
                 ) {
-                    days.forEach { (day, frac) ->
+                    volume.week.forEach { d ->
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                if (d.listeningMs > 0) formatDuration(d.listeningMs) else "",
+                                color = EchoTextMuted, fontSize = 9.5.sp
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
                             Box(
                                 modifier = Modifier
                                     .width(22.dp)
-                                    .height((90 * frac).dp)
-                                    .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
+                                    .height((90f * d.listeningMs / maxMs).dp)
+                                    .clip(RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
                                     .background(EchoPrimary)
                             )
                             Spacer(modifier = Modifier.height(6.dp))
-                            Text(day, color = EchoTextMuted, fontSize = 11.sp)
+                            Text(dayFmt.format(Date(d.from)).take(3), color = EchoTextMuted, fontSize = 11.sp)
                         }
+                    }
+                }
+                if (week == null || week.listeningMs == 0L) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("No listening recorded this week.", color = EchoTextMuted, fontSize = 13.sp)
+                }
+            }
+            EchoCard {
+                Text("Daily breakdown", color = EchoNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(6.dp))
+                volume.week.reversed().forEach { d ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(d.from)), color = EchoNavy, fontSize = 13.sp)
+                        Text(
+                            if (d.listeningMs == 0L) "—"
+                            else "${formatDuration(d.listeningMs)} · avg ${d.avgPercent}% · high ${formatDuration(d.highMs)}",
+                            color = if (d.highMs > 0) Rose500 else EchoTextMuted, fontSize = 12.5.sp
+                        )
                     }
                 }
             }
             EchoCard {
-                Text("Recorded Activity on Device", color = EchoNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Text("Recorded on this phone", color = EchoNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(6.dp))
-                Text("• Completed / saved screening records: $screeningCount", color = EchoTextMuted, fontSize = 13.5.sp)
-                Text("• Logged Speech Clarity A/B trials: $clarityCount", color = EchoTextMuted, fontSize = 13.5.sp)
+                Text("• Listening sessions this week: ${volume.sessions.count { it.end >= (volume.week.firstOrNull()?.from ?: 0L) }}", color = EchoTextMuted, fontSize = 13.5.sp)
+                Text("• Saved screening records: $screeningCount", color = EchoTextMuted, fontSize = 13.5.sp)
             }
         }
     }
 }
 
 @Composable
-private fun ExposureTrendsSubScreen(onBack: () -> Unit) {
+private fun ExposureTrendsSubScreen(volume: VolumeUiState, onBack: () -> Unit) {
     Column(modifier = Modifier.fillMaxSize()) {
-        EchoTopBar(title = "Exposure Trends", onBack = onBack, actions = { EchoStatusPill(label = "Sample data") })
+        EchoTopBar(title = "Exposure Trends", onBack = onBack)
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -391,17 +460,77 @@ private fun ExposureTrendsSubScreen(onBack: () -> Unit) {
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            val total = volume.monthBands.values.sum()
             EchoCard {
-                Text("Ambient Level Distribution (Sample)", color = EchoNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text("How loud you listen", color = EchoNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text("Share of listening time by volume, last 30 days", color = EchoTextMuted, fontSize = 12.5.sp)
                 Spacer(modifier = Modifier.height(10.dp))
-                TrendBar("Quiet (< -45 dBFS)", 0.65f, Emerald500)
+                if (total == 0L) {
+                    Text("No listening recorded in the last 30 days.", color = EchoTextMuted, fontSize = 13.sp)
+                } else {
+                    VolumeAnalytics.Band.entries.forEachIndexed { i, band ->
+                        if (i > 0) Spacer(modifier = Modifier.height(8.dp))
+                        val ms = volume.monthBands[band] ?: 0L
+                        TrendBar(
+                            "${band.label} · ${formatDuration(ms)}",
+                            ms.toFloat() / total,
+                            when (band) {
+                                VolumeAnalytics.Band.LOW -> Emerald500
+                                VolumeAnalytics.Band.MODERATE -> EchoPrimary
+                                VolumeAnalytics.Band.HIGH -> Rose500
+                            }
+                        )
+                    }
+                }
+            }
+
+            // Weekly averages over the last 4 weeks, oldest first.
+            val weeks = volume.month.takeLast(28).chunked(7).map { days ->
+                val ms = days.sumOf { it.listeningMs }
+                Triple(days.first().from, ms, if (ms == 0L) null else Math.round(days.sumOf { it.avgPercent.toDouble() * it.listeningMs } / ms).toInt())
+            }
+            EchoCard {
+                Text("Average volume by week", color = EchoNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text("A steady rise can be an early sign of hearing change", color = EchoTextMuted, fontSize = 12.5.sp)
+                Spacer(modifier = Modifier.height(10.dp))
+                weeks.forEach { (from, ms, avg) ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Week of ${DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(from))}", color = EchoNavy, fontSize = 13.sp)
+                        Text(
+                            if (avg == null) "—" else "avg $avg% · ${formatDuration(ms)}",
+                            color = if (avg != null && avg >= VolumeAnalytics.HIGH_PERCENT) Rose500 else EchoTextMuted,
+                            fontSize = 13.sp, fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
                 Spacer(modifier = Modifier.height(8.dp))
-                TrendBar("Moderate (-45 to -32 dBFS)", 0.28f, EchoPrimary)
-                Spacer(modifier = Modifier.height(8.dp))
-                TrendBar("Elevated (> -32 dBFS)", 0.07f, Amber500)
+                Text(driftText(volume.drift), color = EchoNavy, fontSize = 13.sp, lineHeight = 18.sp)
+            }
+
+            val outputs = AudioOutput.entries.associateWith { o -> volume.month.sumOf { it.byOutput[o] ?: 0L } }.filterValues { it > 0 }
+            if (outputs.isNotEmpty()) {
+                val all = outputs.values.sum()
+                EchoCard {
+                    Text("Listening by output", color = EchoNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    Text("Last 30 days", color = EchoTextMuted, fontSize = 12.5.sp)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    outputs.entries.sortedByDescending { it.value }.forEachIndexed { i, (o, ms) ->
+                        if (i > 0) Spacer(modifier = Modifier.height(8.dp))
+                        TrendBar("${o.label} · ${formatDuration(ms)}", ms.toFloat() / all, EchoPrimary)
+                    }
+                }
             }
         }
     }
+}
+
+private fun driftText(drift: DriftStatus): String = when (drift) {
+    is DriftStatus.Rising ->
+        "Your volume on ${drift.output.label.lowercase()} rose from about ${drift.baselineAvg}% to ${drift.recentAvg}%. Consider taking a hearing test."
+    is DriftStatus.Stable ->
+        "Steady: about ${drift.recentAvg}% this week on ${drift.output.label.lowercase()}, against ${drift.baselineAvg}% before."
+    is DriftStatus.NotEnoughData ->
+        "Trend check needs about ${VolumeDrift.DAYS_NEEDED} days of tracking (${drift.daysTracked.coerceAtMost(VolumeDrift.DAYS_NEEDED)} so far)."
 }
 
 @Composable
@@ -409,20 +538,50 @@ private fun TrendBar(label: String, fraction: Float, color: Color) {
     Column {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(label, color = EchoNavy, fontSize = 13.sp)
-            Text("${(fraction * 100).toInt()}%", color = color, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Text("${(fraction * 100).toInt()}%", color = EchoNavy, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(modifier = Modifier.height(4.dp))
         LinearProgressIndicator(
             progress = { fraction },
             modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
             color = color,
-            trackColor = EchoPrimarySoft
+            trackColor = EchoPrimarySoft,
+            drawStopIndicator = {}
         )
     }
 }
 
+/** Insights generated from the user's own data, followed by general safe-listening tips. */
 @Composable
-private fun InsightsTipsSubScreen(onBack: () -> Unit) {
+private fun InsightsTipsSubScreen(volume: VolumeUiState, screeningState: HearingScreeningUiState, onBack: () -> Unit) {
+    val insights = buildList {
+        val week = weekSummary(volume)
+        if (volume.drift is DriftStatus.Rising) add("Your listening volume is rising" to driftText(volume.drift))
+        if (week != null && week.highMs > 0) {
+            add(
+                "High-volume listening" to
+                    "You spent ${formatDuration(week.highMs)} at ${VolumeAnalytics.HIGH_PERCENT}% volume or more this week. " +
+                    "Lowering it a few steps makes a big difference over time."
+            )
+        }
+        val loudestOutput = volume.week.flatMap { it.byOutput.entries }.groupBy { it.key }
+            .mapValues { (_, v) -> v.sumOf { it.value } }.maxByOrNull { it.value }?.key
+        if (week != null && week.listeningMs > 0 && loudestOutput != null) {
+            add("Most used output" to "Most of your listening this week was on ${loudestOutput.label.lowercase()}.")
+        }
+        val latest = screeningState.savedSessions.firstOrNull()
+        if (latest == null) {
+            add("No hearing screening yet" to "Take a screening in the Test tab to record a baseline you can compare against later.")
+        } else {
+            val days = ((System.currentTimeMillis() - latest.startedAt) / (24 * 60 * 60 * 1000L)).toInt()
+            add("Last screening" to "Your last screening was $days day(s) ago.")
+        }
+    }
+    val tips = listOf(
+        "60/60 guideline" to "Listen at no more than about 60% volume for no more than about 60 minutes at a time, then take a break.",
+        "Noise-cancelling headphones" to "They block background noise, so you don't need to turn the volume up as much.",
+        "Quiet screening room" to "Run hearing screenings somewhere quiet so background noise doesn't affect the result."
+    )
     Column(modifier = Modifier.fillMaxSize()) {
         EchoTopBar(title = "Insights & Tips", onBack = onBack)
         Column(
@@ -432,11 +591,19 @@ private fun InsightsTipsSubScreen(onBack: () -> Unit) {
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            val tips = listOf(
-                "Quiet Screening Room" to "Run preliminary tone checks in a room with ambient noise below -45 dBFS so the noise gate stays green.",
-                "Conservative Monitor Trim" to "Keep Live Monitor volume trim low (starting around 15%) and never exceed comfortable listening levels.",
-                "Matched A/B Word Lists" to "When logging Speech Clarity A/B trials, use unseen word lists of the same length in Processed vs Baseline mode."
-            )
+            Text("From your data", color = EchoNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            if (insights.isEmpty()) {
+                Text("No insights yet. Turn on tracking in the Monitor tab.", color = EchoTextMuted, fontSize = 13.sp)
+            }
+            insights.forEach { (t, d) ->
+                EchoCard {
+                    Text(t, color = EchoNavy, fontSize = 15.5.sp, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(d, color = EchoTextMuted, fontSize = 13.5.sp, lineHeight = 19.sp)
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text("Safe listening tips", color = EchoNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
             tips.forEach { (t, d) ->
                 EchoCard {
                     Text(t, color = EchoNavy, fontSize = 15.5.sp, fontWeight = FontWeight.Bold)
@@ -451,7 +618,7 @@ private fun InsightsTipsSubScreen(onBack: () -> Unit) {
 @Composable
 private fun HistoricalDataSubScreen(
     sessions: List<HearingSessionRecord>,
-    clarityTrials: List<String>,
+    volume: VolumeUiState,
     onOpenScreeningHistory: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -480,13 +647,22 @@ private fun HistoricalDataSubScreen(
             }
 
             EchoCard {
-                Text("Speech Clarity A/B Trials (${clarityTrials.size})", color = EchoNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                val days = volume.month.filter { it.listeningMs > 0 }.reversed()
+                Text("Daily Listening (${days.size} days)", color = EchoNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Text("Last 30 days", color = EchoTextMuted, fontSize = 12.5.sp)
                 Spacer(modifier = Modifier.height(6.dp))
-                if (clarityTrials.isEmpty()) {
-                    Text("No speech clarity logs recorded yet.", color = EchoTextMuted, fontSize = 13.sp)
+                if (days.isEmpty()) {
+                    Text("No listening recorded yet.", color = EchoTextMuted, fontSize = 13.sp)
                 } else {
-                    clarityTrials.take(10).forEach {
-                        Text("• $it", color = EchoTextMuted, fontSize = 12.5.sp, lineHeight = 19.sp)
+                    days.forEach { d ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(d.from)), color = EchoNavy, fontSize = 13.sp)
+                            Text(
+                                "${formatDuration(d.listeningMs)} · avg ${d.avgPercent}% · peak ${d.peakPercent}%",
+                                color = if (d.peakPercent >= VolumeAnalytics.HIGH_PERCENT) Rose500 else EchoTextMuted,
+                                fontSize = 12.5.sp
+                            )
+                        }
                     }
                 }
             }
@@ -513,6 +689,7 @@ fun ProfileScreen(
     onUpdateProfile: (UserProfile) -> Unit,
     screeningState: HearingScreeningUiState,
     monitorState: MonitorUiState,
+    volume: VolumeUiState,
     onRefreshDeviceRoute: () -> Unit,
     onRestartOnboarding: () -> Unit,
     onSignOut: () -> Unit = {}
@@ -549,6 +726,7 @@ fun ProfileScreen(
             ProfileSubScreen.CONNECTED_DEVICES -> ConnectedDevicesSubScreen(
                 screeningState = screeningState,
                 monitorState = monitorState,
+                volume = volume,
                 onRefresh = onRefreshDeviceRoute,
                 onBack = { subScreen = ProfileSubScreen.MAIN }
             )
@@ -567,7 +745,7 @@ fun ProfileScreen(
             ProfileSubScreen.EXPORT_DATA -> ExportDataSubScreen(
                 profile = profile,
                 sessions = screeningState.savedSessions,
-                clarityTrials = monitorState.trials,
+                volume = volume,
                 onBack = { subScreen = ProfileSubScreen.MAIN }
             )
 
@@ -620,7 +798,7 @@ private fun ProfileMainScreen(
                     )
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = profile.preferredName,
+                            text = profile.preferredName.ifBlank { "Add your name" },
                             color = EchoNavy,
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Bold
@@ -721,7 +899,7 @@ private fun EditProfileSubScreen(
             Spacer(modifier = Modifier.weight(1f))
             EchoPrimaryButton(
                 text = "Save Profile",
-                onClick = { onSave(profile.copy(preferredName = name.ifBlank { "Alex Parker" }, ageRange = ageRange, preferredLanguage = language)) }
+                onClick = { onSave(profile.copy(preferredName = name.trim(), ageRange = ageRange, preferredLanguage = language)) }
             )
         }
     }
@@ -731,6 +909,7 @@ private fun EditProfileSubScreen(
 private fun ConnectedDevicesSubScreen(
     screeningState: HearingScreeningUiState,
     monitorState: MonitorUiState,
+    volume: VolumeUiState,
     onRefresh: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -760,10 +939,17 @@ private fun ConnectedDevicesSubScreen(
                 EchoOutlinedPillButton(text = "Refresh Audio Route", icon = Icons.Default.Refresh, onClick = onRefresh)
             }
             EchoCard {
-                Text("Monitor Inputs (${monitorState.inputs.size})", color = EchoNavy, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                monitorState.inputs.forEach { Text("• ${it.label}", color = EchoTextMuted, fontSize = 12.5.sp) }
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Monitor Outputs (${monitorState.outputs.size})", color = EchoNavy, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Text("Media Output Now", color = EchoNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(volume.output.label, color = EchoPrimary, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Volume ${volume.volume.percent}% · ${if (volume.playing) "playing" else "nothing playing"}",
+                    color = EchoTextMuted,
+                    fontSize = 13.sp
+                )
+            }
+            EchoCard {
+                Text("Audio Outputs Connected (${monitorState.outputs.size})", color = EchoNavy, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 monitorState.outputs.forEach { Text("• ${it.label}", color = EchoTextMuted, fontSize = 12.5.sp) }
             }
         }
@@ -818,9 +1004,9 @@ private fun PrivacyDataSubScreen(
                 Text("Offline-First Privacy Guarantee", color = EchoNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    "• Microphone audio for ambient noise gating and Live Monitor DSP is processed transiently in RAM only.\n" +
-                        "• Zero raw audio is saved to disk or transmitted to any cloud server.\n" +
-                        "• Screening sessions and EQ settings are stored exclusively in app-private local storage.",
+                    "• Microphone audio for the screening noise check is processed in memory only and never saved.\n" +
+                        "• Volume tracking records only your phone's volume setting, whether media is playing, and the output type. It does not use the microphone or know what you listen to.\n" +
+                        "• Screening sessions and volume history are stored only in this app's private storage on the phone. Nothing is sent to a server.",
                     color = EchoTextMuted,
                     fontSize = 13.5.sp,
                     lineHeight = 21.sp
@@ -839,17 +1025,34 @@ private fun PrivacyDataSubScreen(
 private fun ExportDataSubScreen(
     profile: UserProfile,
     sessions: List<HearingSessionRecord>,
-    clarityTrials: List<String>,
+    volume: VolumeUiState,
     onBack: () -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
-    val jsonPreview = remember(profile, sessions, clarityTrials) {
+    val jsonPreview = remember(profile, sessions, volume.month, volume.sessions) {
         GsonBuilder().setPrettyPrinting().create().toJson(
             mapOf(
                 "profile" to profile,
                 "screeningSessions" to sessions,
-                "speechClarityTrials" to clarityTrials
+                "dailyListening" to volume.month.filter { it.listeningMs > 0 }.map { d ->
+                    mapOf(
+                        "date" to DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(d.from)),
+                        "listeningMinutes" to d.listeningMs / 60_000,
+                        "averageVolumePercent" to d.avgPercent,
+                        "peakVolumePercent" to d.peakPercent,
+                        "highVolumeMinutes" to d.highMs / 60_000
+                    )
+                },
+                "listeningSessions" to volume.sessions.map { s ->
+                    mapOf(
+                        "start" to DateFormat.getDateTimeInstance().format(Date(s.start)),
+                        "minutes" to s.durationMs / 60_000,
+                        "averageVolumePercent" to s.avgPercent,
+                        "peakVolumePercent" to s.peakPercent,
+                        "output" to s.output.label
+                    )
+                }
             )
         )
     }
@@ -897,7 +1100,7 @@ private fun AboutEchoSubScreen(onBack: () -> Unit) {
                 Text("ECHO Integrated POC", color = EchoNavy, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    "Combines pure-tone audiometric screening (Modified Hughson–Westlake & Experimental Binary Search Refinement with continuous ambient noise gating) and a native C++ Oboe full-duplex live audio DSP monitor (4-band LR4 crossover, noise gate, adaptive denoiser, downward compression, and 6-band per-ear EQ).\n\n" +
+                    "Combines pure-tone hearing screening (Modified Hughson–Westlake and Binary Search, with ambient noise gating) a live hearing aid (microphone to earbuds with noise gate, denoiser, 4-band compression and per-ear EQ), and background phone-volume tracking with listening analytics, high-volume alerts and hearing-test suggestions.\n\n" +
                         "Engineering prototype only — not a medical device or calibrated hearing aid.",
                     color = EchoTextMuted,
                     fontSize = 13.5.sp,
@@ -927,10 +1130,10 @@ private fun HelpFaqSubScreen(onBack: () -> Unit) {
                 )
             }
             EchoCard {
-                Text("Why does Live Monitor stop when I switch tabs?", color = EchoNavy, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Text("What does the volume percentage mean?", color = EchoNavy, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    "Screening and live monitoring share the microphone and audio output route, so leaving Monitor or backgrounding the app safely stops the stream.",
+                    "It is your phone's media volume setting (0–100%), not a measured sound level. The same percentage can be louder on some earbuds than others, so ECHO compares your volume per output type.",
                     color = EchoTextMuted,
                     fontSize = 13.sp,
                     lineHeight = 19.sp

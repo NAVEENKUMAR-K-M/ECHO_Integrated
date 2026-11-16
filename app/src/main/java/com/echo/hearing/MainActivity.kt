@@ -1,7 +1,9 @@
 package com.echo.hearing
 
 import android.Manifest
+import android.content.Intent
 import android.os.Bundle
+import com.echo.hearing.volume.AppNavigation
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -46,8 +48,14 @@ class MainActivity : ComponentActivity() {
 
     private val monitorViewModel: MonitorViewModel by viewModels()
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        AppNavigation.handle(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) AppNavigation.handle(intent)
 
         setContent {
             EchoTheme {

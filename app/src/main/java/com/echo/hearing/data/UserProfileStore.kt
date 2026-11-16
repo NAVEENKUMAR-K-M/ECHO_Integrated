@@ -7,7 +7,7 @@ data class UserProfile(
     val initialScreeningCompleted: Boolean = false,
     val accountMode: String = "Guest",
     val email: String = "",
-    val preferredName: String = "Alex Parker",
+    val preferredName: String = "",
     val ageRange: String = "18–35",
     val preferredLanguage: String = "English",
     val notificationsEnabled: Boolean = true,
@@ -24,7 +24,8 @@ class UserProfileStore(context: Context) {
         initialScreeningCompleted = prefs.getBoolean(K_INITIAL_TEST, false),
         accountMode = prefs.getString(K_ACCOUNT_MODE, "Guest") ?: "Guest",
         email = prefs.getString(K_EMAIL, "") ?: "",
-        preferredName = prefs.getString(K_NAME, "Alex Parker") ?: "Alex Parker",
+        // "Alex Parker" was the old placeholder default; treat it as no name.
+        preferredName = (prefs.getString(K_NAME, "") ?: "").takeIf { it != "Alex Parker" } ?: "",
         ageRange = prefs.getString(K_AGE, "18–35") ?: "18–35",
         preferredLanguage = prefs.getString(K_LANG, "English") ?: "English",
         notificationsEnabled = prefs.getBoolean(K_NOTIF, true),

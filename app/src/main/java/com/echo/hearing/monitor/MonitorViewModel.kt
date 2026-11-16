@@ -2,10 +2,8 @@ package com.echo.hearing.monitor
 
 import android.app.Application
 import android.content.Context
-import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
-import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
@@ -71,7 +69,7 @@ data class MonitorUiState(
     val importMessage: String = ""
 )
 
-class MonitorViewModel(app: Application) : AndroidViewModel(app) {
+class MonitorViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private val audioManager = app.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -83,7 +81,6 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
 
     private var inputDevices: List<AudioDeviceInfo> = emptyList()
     private var outputDevices: List<AudioDeviceInfo> = emptyList()
-    private var focusRequest: AudioFocusRequest? = null
     private var pollJob: Job? = null
 
     private val deviceCallback = object : AudioDeviceCallback() {
@@ -95,12 +92,26 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
         restore()
         applyDsp()
         audioManager.registerAudioDeviceCallback(deviceCallback, handler)
+        // The hearing aid keeps running in its background service after this screen goes away.
+        // When the screen comes back, pick up the running session instead of starting a new one.
+        if (NativeAudioEngine.nativeIsRunning()) {
+            _state.update {
+                it.copy(
+                    running = true,
+                    inputId = MonitorService.activeInputId ?: it.inputId,
+                    outputId = MonitorService.activeOutputId ?: it.outputId,
+                    status = "Running in the background"
+                )
+            }
+            startPolling()
+        }
         refreshDevices()
     }
 
     override fun onCleared() {
+        // Do not stop the engine here: the foreground service owns it while the app is closed.
         audioManager.unregisterAudioDeviceCallback(deviceCallback)
-        stop("Stopped")
+        pollJob?.cancel()
         super.onCleared()
     }
 
@@ -163,26 +174,27 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
             ?: return setStatus("Choose a playback output device before starting.")
         val inp = inputDevices.firstOrNull { it.id == s.inputId }
             ?: return setStatus("Choose an available microphone before starting.")
-        if (!requestFocus()) {
-            releaseFocus()
-            return setStatus("Could not get audio focus. Pause other audio and try again.")
-        }
         NativeAudioEngine.nativeSetMonitorLevel(s.monitorLevel)
         if (!NativeAudioEngine.nativeStart(inp.id, out.id)) {
-            releaseFocus()
             return setStatus(NativeAudioEngine.nativeGetStreamInfo())
         }
-        _state.update { it.copy(running = true, status = "Starting audio monitor…") }
+        // The service holds audio focus and keeps the hearing aid alive in the background.
+        MonitorService.start(app, inp.id, out.id)
+        _state.update { it.copy(running = true, status = "Starting hearing aid…") }
+        startPolling()
+    }
+
+    private fun startPolling() {
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
             while (true) {
                 if (!NativeAudioEngine.nativeIsRunning()) {
-                    val msg = NativeAudioEngine.nativeGetStreamInfo()
-                    stop(if (msg == "Audio stream stopped") "Audio monitor stopped" else msg)
+                    val msg = MonitorService.consumeStopReason() ?: NativeAudioEngine.nativeGetStreamInfo()
+                    stop(if (msg == "Audio stream stopped") "Hearing aid stopped" else msg)
                     return@launch
                 }
                 val peak = NativeAudioEngine.nativeGetInputPeak().coerceIn(0f, 1f)
-                setStatus("Monitoring · mic level ${(peak * 100).toInt()}%\n" + NativeAudioEngine.nativeGetStreamInfo())
+                setStatus("Hearing aid on · mic level ${(peak * 100).toInt()}%\n" + NativeAudioEngine.nativeGetStreamInfo())
                 delay(STATUS_REFRESH_MS)
             }
         }
@@ -193,35 +205,12 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
         pollJob = null
         if (_state.value.running) {
             NativeAudioEngine.nativeStop()
-            releaseFocus()
+            MonitorService.stop(app)
             _state.update { it.copy(running = false, status = message) }
         }
     }
 
     private fun setStatus(text: String) = _state.update { it.copy(status = text) }
-
-    private fun requestFocus(): Boolean {
-        val attrs = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-            .build()
-        val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
-            .setAudioAttributes(attrs)
-            .setAcceptsDelayedFocusGain(false)
-            .setOnAudioFocusChangeListener { change ->
-                if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
-                    handler.post { stop("Stopped because audio focus was lost") }
-                }
-            }
-            .build()
-        focusRequest = req
-        return audioManager.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-    }
-
-    private fun releaseFocus() {
-        focusRequest?.let(audioManager::abandonAudioFocusRequest)
-        focusRequest = null
-    }
 
     fun onPermissionDenied() = setStatus("Microphone permission is required for live monitoring.")
 
@@ -337,16 +326,25 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Copies the latest saved screening's thresholds into the reference audiogram fields. */
-    fun importLatestScreening() {
+    /**
+     * Fits the hearing aid from the latest saved screening: sets the per-ear EQ gains with
+     * [HearingAidFitting] (applied live if the aid is running) and copies the thresholds into
+     * the audiogram record. With [onlyIfNew], does nothing when that screening was already used,
+     * so manual EQ adjustments are not overwritten.
+     */
+    fun importLatestScreening(onlyIfNew: Boolean = false) {
         viewModelScope.launch {
             val latest = runCatching {
                 repository.listSessions().filter { it.thresholdResults.isNotEmpty() }.maxByOrNull { it.startedAt }
             }.getOrNull()
             if (latest == null) {
-                _state.update { it.copy(importMessage = "No screening results saved yet. Run a screening first.") }
+                if (!onlyIfNew) _state.update { it.copy(importMessage = "No screening results saved yet. Run a screening first.") }
                 return@launch
             }
+            if (onlyIfNew && prefs.getString(K_FITTED_SESSION, null) == latest.sessionId) return@launch
+            val gains = HearingAidFitting.fromThresholds(latest.thresholdResults) ?: return@launch
+            for (ear in 0..1) for (band in MonitorLimits.EQ_CENTERS_HZ.indices) setGain(ear, band, gains[ear][band])
+            prefs.edit().putString(K_FITTED_SESSION, latest.sessionId).apply()
             var count = 0
             for (r in latest.thresholdResults) {
                 val band = MonitorLimits.EQ_CENTERS_HZ.indexOf(r.frequencyHz)
@@ -359,8 +357,9 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
             val date = DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(latest.startedAt))
             _state.update {
                 it.copy(
-                    importMessage = "Imported $count values from the $date screening. These are uncalibrated " +
-                        "screening levels, kept as reference only. They do not change any gain."
+                    importMessage = "Fitted from your $date screening. " +
+                        "Left: ${gainSummary(gains[0])}. Right: ${gainSummary(gains[1])}. " +
+                        "$count threshold values copied to the audiogram record. You can fine-tune each band below."
                 )
             }
         }
@@ -445,6 +444,15 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
     private fun gainKey(ear: Int, band: Int) = "gain_${ear}_$band"
     private fun thresholdKey(ear: Int, band: Int) = "audiogram_${ear}_$band"
 
+    private fun gainSummary(gains: List<Float>): String {
+        val boosted = MonitorLimits.EQ_CENTERS_HZ.indices.filter { gains[it] > 0f }
+        if (boosted.isEmpty()) return "flat"
+        return boosted.joinToString(", ") { b ->
+            val hz = MonitorLimits.EQ_CENTERS_HZ[b]
+            "+${gains[b].toInt()} dB at ${if (hz >= 1000) "${hz / 1000} kHz" else "$hz Hz"}"
+        }
+    }
+
     private companion object {
         const val PREFS = "echo_profile"
         const val STATUS_REFRESH_MS = 250L
@@ -460,5 +468,6 @@ class MonitorViewModel(app: Application) : AndroidViewModel(app) {
         const val K_TRIALS = "clarity_trials"
         const val K_REAL_EAR = "real_ear_verified"
         const val K_REAL_EAR_NOTES = "real_ear_notes"
+        const val K_FITTED_SESSION = "fitted_from_session_id"
     }
 }

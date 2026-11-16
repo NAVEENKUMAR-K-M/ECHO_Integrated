@@ -2,6 +2,7 @@ package com.echo.hearing.monitor
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -47,15 +48,22 @@ fun MonitorScreen(
     val context = LocalContext.current
     var subScreen by remember { mutableStateOf(if (openSettingsInitially) MonitorSubScreen.SETTINGS else MonitorSubScreen.MAIN) }
 
-    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) vm.start() else vm.onPermissionDenied()
+    // The microphone is required. Notifications are optional: without them the hearing aid
+    // still runs in the background, but its notification (with the Stop button) is hidden.
+    val needed = buildList {
+        add(Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
+    }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        val micGranted = result[Manifest.permission.RECORD_AUDIO]
+            ?: (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+        if (micGranted) vm.start() else vm.onPermissionDenied()
     }
     val startOrAsk = {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            vm.start()
-        } else {
-            permission.launch(Manifest.permission.RECORD_AUDIO)
+        val missing = needed.filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
         }
+        if (missing.isEmpty()) vm.start() else permission.launch(missing.toTypedArray())
     }
 
     Box(
@@ -103,10 +111,10 @@ private fun MonitorMainScreen(
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         EchoTopBar(
-            title = "Sound Monitoring",
+            title = "Hearing Aid",
             actions = {
                 EchoStatusPill(
-                    label = if (s.running) "Live Oboe DSP" else "Sample data",
+                    label = if (s.running) "Live" else "Off",
                     icon = if (s.running) Icons.Filled.GraphicEq else Icons.Outlined.Info,
                     containerColor = if (s.running) EmeraldSoft else EchoSurfaceAlt,
                     borderColor = if (s.running) Emerald500 else EchoPillBorder,
@@ -130,13 +138,13 @@ private fun MonitorMainScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Live Sound Monitor",
+                        text = "Live Hearing Aid",
                         color = EchoNavy,
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold
                     )
                     EchoStatusPill(
-                        label = if (s.running) "Live DSP" else "Sample data",
+                        label = if (s.running) "Running" else "Stopped",
                         icon = Icons.Outlined.Info
                     )
                 }
@@ -155,14 +163,14 @@ private fun MonitorMainScreen(
                     )
                     Column {
                         Text(
-                            text = if (s.running) "Monitoring Active" else "Moderate Level",
+                            text = if (s.running) "Active" else "Off",
                             color = if (s.running) Emerald500 else EchoPrimary,
                             fontSize = 24.sp,
                             fontWeight = FontWeight.ExtraBold
                         )
                         Text(
                             text = if (s.running) s.status.lineSequence().firstOrNull() ?: "Live audio active"
-                            else "Comfortable ambient environment",
+                            else "Start to hear your surroundings through your earbuds",
                             color = EchoTextMuted,
                             fontSize = 13.5.sp
                         )
@@ -211,14 +219,14 @@ private fun MonitorMainScreen(
 
                 if (s.running) {
                     EchoPrimaryButton(
-                        text = "Stop Monitor",
+                        text = "Stop Hearing Aid",
                         icon = Icons.Default.Stop,
                         containerColor = Rose500,
                         onClick = { vm.stop() }
                     )
                 } else {
                     EchoPrimaryButton(
-                        text = "Start Live Monitor",
+                        text = "Start Hearing Aid",
                         icon = Icons.Default.PlayArrow,
                         onClick = onStartOrAsk
                     )
@@ -233,7 +241,7 @@ private fun MonitorMainScreen(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Start with low phone and earbud volume. Prototype only; not a hearing aid. Digital limits are not calibrated to dB SPL.",
+                    text = "Keeps running in the background; stop it here or from the notification. Start with low phone volume. Prototype only, not a medical hearing aid; levels are not calibrated.",
                     color = Amber500,
                     fontSize = 11.5.sp,
                     lineHeight = 16.sp
@@ -242,17 +250,17 @@ private fun MonitorMainScreen(
 
             // Three signature pill buttons from Image 4
             EchoOutlinedPillButton(
-                text = "View Exposure History",
+                text = "Speech Clarity A/B History",
                 icon = Icons.Outlined.History,
                 onClick = onOpenHistory
             )
             EchoOutlinedPillButton(
-                text = "Exposure Details",
+                text = "Processing Details",
                 icon = Icons.Outlined.Assessment,
                 onClick = onOpenDetails
             )
             EchoOutlinedPillButton(
-                text = "Monitoring Settings (DSP, EQ, Audiogram & A/B Log)",
+                text = "Hearing Aid Settings (DSP, EQ, Audiogram & A/B Log)",
                 icon = Icons.Outlined.Settings,
                 onClick = onOpenSettings
             )
@@ -267,9 +275,9 @@ private fun ExposureHistoryScreen(
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         EchoTopBar(
-            title = "Exposure History",
+            title = "Speech Clarity A/B History",
             onBack = onBack,
-            actions = { EchoStatusPill(label = if (s.trials.isEmpty()) "Sample data" else "${s.trials.size} logs") }
+            actions = { EchoStatusPill(label = "${s.trials.size} logs") }
         )
         Column(
             modifier = Modifier
@@ -279,24 +287,11 @@ private fun ExposureHistoryScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             EchoCard {
-                Text("Recent Ambient Exposure (Sample)", color = EchoNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                Spacer(modifier = Modifier.height(8.dp))
-                val samples = listOf(
-                    "Today · 09:30 AM · Quiet Room · Comfortable",
-                    "Today · 11:15 AM · Commute · Moderate Level",
-                    "Yesterday · 06:00 PM · Cafe · Moderate Level"
-                )
-                samples.forEach { item ->
-                    Text("• $item", color = EchoTextMuted, fontSize = 13.5.sp, lineHeight = 22.sp)
-                }
-            }
-
-            EchoCard {
                 Text("Saved Speech Clarity A/B Logs", color = EchoNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(8.dp))
                 if (s.trials.isEmpty()) {
                     Text(
-                        "No clarity trials logged yet. Open Monitoring Settings → Speech clarity A/B log to record Processed vs Baseline word scores.",
+                        "No clarity trials logged yet. Open Hearing Aid Settings → Speech clarity A/B log to record Processed vs Baseline word scores.",
                         color = EchoTextMuted,
                         fontSize = 13.sp,
                         lineHeight = 19.sp
@@ -318,9 +313,9 @@ private fun ExposureDetailsScreen(
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         EchoTopBar(
-            title = "Exposure Details",
+            title = "Processing Details",
             onBack = onBack,
-            actions = { EchoStatusPill(label = if (s.running) "Live" else "Sample data") }
+            actions = { EchoStatusPill(label = if (s.running) "Running" else "Stopped") }
         )
         Column(
             modifier = Modifier
@@ -409,10 +404,19 @@ private fun MonitoringSettingsScreen(
 
             Section("Hearing profile (6-band per-ear EQ)") {
                 Text(
-                    "Fitting gain offsets, ±6 dB per band. Use only gains from an audiogram-based fitting.",
+                    "Set automatically from your latest hearing screening (half-gain rule, up to +6 dB per band). " +
+                        "A new screening refits it. You can fine-tune each band.",
                     color = EchoTextMuted,
                     fontSize = 12.sp
                 )
+                EchoOutlinedPillButton(
+                    text = "Refit from latest screening",
+                    icon = Icons.Outlined.Hearing,
+                    onClick = { vm.importLatestScreening() }
+                )
+                if (s.importMessage.isNotEmpty()) {
+                    Text(s.importMessage, fontSize = 12.sp, color = EchoPrimary)
+                }
                 listOf("Left ear", "Right ear").forEachIndexed { ear, name ->
                     Text(name, color = EchoPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                     MonitorLimits.EQ_CENTERS_HZ.forEachIndexed { band, hz ->
@@ -428,18 +432,11 @@ private fun MonitoringSettingsScreen(
 
             Section("Audiogram and verification record") {
                 Text(
-                    "Reference only: thresholds do not change any gain. Enter dB HL from a professional audiogram, or import the latest ECHO screening (uncalibrated).",
+                    "Thresholds from your latest screening are copied here automatically. You can also enter values " +
+                        "from a professional audiogram for reference; typed values do not change the EQ.",
                     color = EchoTextMuted,
                     fontSize = 12.sp
                 )
-                EchoOutlinedPillButton(
-                    text = "Import latest screening",
-                    icon = Icons.Outlined.Download,
-                    onClick = vm::importLatestScreening
-                )
-                if (s.importMessage.isNotEmpty()) {
-                    Text(s.importMessage, fontSize = 12.sp, color = EchoPrimary)
-                }
                 listOf("Left ear", "Right ear").forEachIndexed { ear, name ->
                     Text("$name (dB HL)", color = EchoPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                     MonitorLimits.EQ_CENTERS_HZ.toList().chunked(3).forEachIndexed { rowIdx, chunk ->

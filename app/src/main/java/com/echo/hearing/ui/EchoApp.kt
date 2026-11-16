@@ -14,11 +14,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.echo.hearing.data.UserProfileStore
 import com.echo.hearing.domain.statemachine.SessionState
+import com.echo.hearing.volume.AppNavigation
+import com.echo.hearing.volume.VolumeMonitorScreen
+import com.echo.hearing.volume.VolumeViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.echo.hearing.monitor.MonitorScreen
 import com.echo.hearing.monitor.MonitorViewModel
 import com.echo.hearing.ui.theme.*
@@ -27,15 +28,16 @@ private enum class EchoTab(val label: String, val selectedIcon: ImageVector, val
     TEST("Test", Icons.Filled.Hearing, Icons.Outlined.Hearing),
     HOME("Home", Icons.Filled.GridView, Icons.Outlined.GridView),
     MONITOR("Monitor", Icons.Filled.GraphicEq, Icons.Outlined.GraphicEq),
+    AID("Aid", Icons.Filled.Headphones, Icons.Outlined.Headphones),
     REPORTS("Reports", Icons.Filled.BarChart, Icons.Outlined.BarChart),
     PROFILE("Profile", Icons.Filled.Person, Icons.Outlined.Person)
 }
 
 /**
- * Top-level shell: onboarding flow followed by the 5-tab ECHO workspace
- * (Test, Home, Monitor, Reports, Profile).
- * Screening and live monitoring share the microphone and output route, so leaving
- * the Monitor tab or the app stops the live Oboe monitor loop.
+ * Top-level shell: onboarding flow followed by the 6-tab ECHO workspace
+ * (Test, Home, Monitor, Aid, Reports, Profile).
+ * Screening and the hearing aid share the microphone and output route, so opening the
+ * Test tab stops the hearing aid. Otherwise it keeps running in a background service.
  */
 @Composable
 fun EchoApp(
@@ -47,13 +49,37 @@ fun EchoApp(
     val profileStore = remember { UserProfileStore(context) }
     var profile by remember { mutableStateOf(profileStore.load()) }
     var showOnboarding by rememberSaveable { mutableStateOf(!profile.onboardingCompleted) }
-    var tab by rememberSaveable { mutableStateOf(EchoTab.TEST) }
+    // Reopening the app while the hearing aid runs in the background lands on its tab.
+    var tab by rememberSaveable { mutableStateOf(if (monitorViewModel.state.value.running) EchoTab.AID else EchoTab.TEST) }
     var openHistorySignal by remember { mutableIntStateOf(0) }
     var launchInitialScreeningSignal by remember { mutableIntStateOf(0) }
-    var openMonitorSettingsOnce by remember { mutableStateOf(false) }
+    var openAidSettingsOnce by remember { mutableStateOf(false) }
 
     val screeningState by screeningViewModel.uiState.collectAsState()
     val monitorState by monitorViewModel.state.collectAsState()
+    // One shared source of live volume data for the Monitor, Reports, Home and Profile tabs.
+    val volumeViewModel: VolumeViewModel = viewModel()
+    val volumeState by volumeViewModel.state.collectAsState()
+    val volumeTracking = volumeState.tracking
+
+    // Notifications can ask for a tab (high-volume alert -> Monitor, hearing-test suggestion -> Test).
+    val requestedTab by AppNavigation.requestedTab.collectAsState()
+    LaunchedEffect(requestedTab) {
+        when (requestedTab) {
+            AppNavigation.TAB_TEST -> tab = EchoTab.TEST
+            AppNavigation.TAB_MONITOR -> tab = EchoTab.MONITOR
+            AppNavigation.TAB_AID -> tab = EchoTab.AID
+        }
+        if (requestedTab != null) AppNavigation.consumed()
+    }
+    // Screening and the hearing aid share the microphone: switching to the Test tab, by any route, stops the aid.
+    var previousTab by remember { mutableStateOf(tab) }
+    LaunchedEffect(tab) {
+        if (tab == EchoTab.TEST && previousTab != EchoTab.TEST) {
+            monitorViewModel.stop("Stopped so the screening can use the microphone")
+        }
+        previousTab = tab
+    }
     var initialTestPending by rememberSaveable {
         mutableStateOf(!profile.initialScreeningCompleted && screeningState.savedSessions.isEmpty())
     }
@@ -64,20 +90,18 @@ fun EchoApp(
             profile = completedInitial
             profileStore.save(completedInitial)
             initialTestPending = false
-            monitorViewModel.importLatestScreening()
         }
     }
 
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    DisposableEffect(lifecycle) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) {
-                monitorViewModel.stop("Stopped when the app left the foreground")
-            }
-        }
-        lifecycle.addObserver(observer)
-        onDispose { lifecycle.removeObserver(observer) }
+    // Every new screening automatically fits the hearing aid (once per screening, so later manual
+    // EQ adjustments are kept).
+    val latestScreeningId = screeningState.savedSessions
+        .filter { it.thresholdResults.isNotEmpty() }
+        .maxByOrNull { it.startedAt }?.sessionId
+    LaunchedEffect(latestScreeningId) {
+        if (latestScreeningId != null) monitorViewModel.importLatestScreening(onlyIfNew = true)
     }
+
 
     if (showOnboarding) {
         val needsInitial = !profile.initialScreeningCompleted && screeningState.savedSessions.isEmpty()
@@ -125,10 +149,7 @@ fun EchoApp(
                         NavigationBarItem(
                             selected = selected,
                             onClick = {
-                                if (t != EchoTab.MONITOR) {
-                                    monitorViewModel.stop("Stopped")
-                                }
-                                openMonitorSettingsOnce = false
+                                openAidSettingsOnce = false
                                 tab = t
                             },
                             icon = {
@@ -174,8 +195,8 @@ fun EchoApp(
                     onRequestMicrophonePermission = onRequestMicrophonePermission,
                     onImportToMonitor = {
                         monitorViewModel.importLatestScreening()
-                        openMonitorSettingsOnce = true
-                        tab = EchoTab.MONITOR
+                        openAidSettingsOnce = true
+                        tab = EchoTab.AID
                     },
                     onSkipInitialTest = {
                         initialTestPending = false
@@ -189,6 +210,7 @@ fun EchoApp(
                     profile = profile,
                     screeningState = screeningState,
                     monitorState = monitorState,
+                    volumeTracking = volumeTracking,
                     initialTestPending = initialTestPending || (!profile.initialScreeningCompleted && screeningState.savedSessions.isEmpty()),
                     onStartInitialTest = {
                         tab = EchoTab.TEST
@@ -196,6 +218,7 @@ fun EchoApp(
                     },
                     onNavigateToTest = { tab = EchoTab.TEST },
                     onNavigateToMonitor = { tab = EchoTab.MONITOR },
+                    onNavigateToAid = { tab = EchoTab.AID },
                     onNavigateToReports = { tab = EchoTab.REPORTS },
                     onOpenScreeningHistory = {
                         openHistorySignal++
@@ -203,14 +226,14 @@ fun EchoApp(
                     }
                 )
 
-                EchoTab.MONITOR -> MonitorScreen(
-                    vm = monitorViewModel,
-                    openSettingsInitially = openMonitorSettingsOnce
-                )
+                EchoTab.MONITOR -> VolumeMonitorScreen(vm = volumeViewModel, onTakeHearingTest = { tab = EchoTab.TEST })
+
+                EchoTab.AID -> MonitorScreen(vm = monitorViewModel, openSettingsInitially = openAidSettingsOnce)
 
                 EchoTab.REPORTS -> ReportsScreen(
                     screeningState = screeningState,
-                    monitorState = monitorState,
+                    volume = volumeState,
+                    onOpenMonitor = { tab = EchoTab.MONITOR },
                     onOpenScreeningHistory = {
                         openHistorySignal++
                         tab = EchoTab.TEST
@@ -225,6 +248,7 @@ fun EchoApp(
                     },
                     screeningState = screeningState,
                     monitorState = monitorState,
+                    volume = volumeState,
                     onRefreshDeviceRoute = { screeningViewModel.refreshDeviceRoute() },
                     onRestartOnboarding = {
                         monitorViewModel.stop("Stopped")

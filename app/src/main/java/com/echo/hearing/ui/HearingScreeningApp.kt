@@ -682,7 +682,7 @@ private fun ScreeningBriefingScreen(
                 EchoCard(borderColor = EchoPillBorder, containerColor = EchoSurfaceAlt) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Icon(Icons.Outlined.PersonOutline, contentDescription = null, tint = EchoPrimary)
-                        Text("Welcome, $preferredName", color = EchoNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text(if (preferredName.isBlank()) "Welcome" else "Welcome, $preferredName", color = EchoNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
@@ -1334,7 +1334,7 @@ private fun ScreeningHistoryScreen(
             title = "Screening History",
             onBack = onBack,
             actions = {
-                EchoStatusPill(label = if (sessions.isEmpty()) "Sample data" else "${sessions.size} saved")
+                EchoStatusPill(label = if (sessions.isEmpty()) "None saved" else "${sessions.size} saved")
             }
         )
         Column(
@@ -1351,7 +1351,7 @@ private fun ScreeningHistoryScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("Previous Screenings", color = EchoNavy, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                    EchoStatusPill(label = if (sessions.isEmpty()) "Sample data" else "Local JSON")
+                    EchoStatusPill(label = "On this phone")
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
@@ -1372,7 +1372,8 @@ private fun ScreeningHistoryScreen(
                 onClick = onReminders
             )
             EchoOutlinedPillButton(
-                text = if (sessions.isNotEmpty()) "View Latest Record" else "View Latest Record (Sample #1)",
+                text = "View Latest Record",
+                enabled = sessions.isNotEmpty(),
                 icon = Icons.Outlined.Description,
                 onClick = onViewLatest
             )
@@ -1413,7 +1414,7 @@ private fun CompareScreeningsScreen(
         EchoTopBar(
             title = "Compare Screenings",
             onBack = onBack,
-            actions = { if (sessions.size < 2) EchoStatusPill(label = "Sample data") }
+            actions = { EchoStatusPill(label = "${sessions.size} saved") }
         )
         Column(
             modifier = Modifier
@@ -1450,20 +1451,14 @@ private fun CompareScreeningsScreen(
                 }
             } else {
                 EchoCard {
-                    Text("Sample Comparison", color = EchoNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    Text("Not enough screenings yet", color = EchoNavy, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        "Complete at least 2 screenings to compare your real threshold results side-by-side. Sample reference shown below:",
+                        "Complete at least 2 screenings to compare your results side by side. " +
+                            "You have ${sessions.size} saved.",
                         color = EchoTextMuted,
                         fontSize = 13.sp
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    listOf(500, 1000, 2000, 4000).forEach { hz ->
-                        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("AS/AD $hz Hz", color = EchoNavy, fontSize = 13.5.sp)
-                            Text("20 → 20 dBFS (0 dB)", color = EchoPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
-                        }
-                    }
                 }
             }
         }
@@ -1509,22 +1504,8 @@ private fun RecordDetailScreen(
     record: HearingSessionRecord?,
     onBack: () -> Unit
 ) {
-    val results = record?.thresholdResults ?: listOf(
-        ThresholdResult(Ear.LEFT, 500, 20, 2, 4),
-        ThresholdResult(Ear.LEFT, 1000, 15, 2, 4),
-        ThresholdResult(Ear.LEFT, 2000, 20, 2, 4),
-        ThresholdResult(Ear.LEFT, 4000, 25, 2, 5),
-        ThresholdResult(Ear.RIGHT, 500, 20, 2, 4),
-        ThresholdResult(Ear.RIGHT, 1000, 20, 2, 4),
-        ThresholdResult(Ear.RIGHT, 2000, 25, 2, 4),
-        ThresholdResult(Ear.RIGHT, 4000, 25, 2, 5)
-    )
     Column(modifier = Modifier.fillMaxSize()) {
-        EchoTopBar(
-            title = if (record != null) "Screening Record" else "Sample Record #1",
-            onBack = onBack,
-            actions = { if (record == null) EchoStatusPill(label = "Sample data") }
-        )
+        EchoTopBar(title = "Screening Record", onBack = onBack)
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -1532,15 +1513,27 @@ private fun RecordDetailScreen(
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            AudiogramView(thresholdResults = results)
+            if (record == null) {
+                EchoCard {
+                    Text("No screening saved yet", color = EchoNavy, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text("Complete a screening in the Test tab and its results will appear here.", color = EchoTextMuted, fontSize = 13.sp)
+                }
+                return@Column
+            }
+            val results = record.thresholdResults
+            if (results.isNotEmpty()) AudiogramView(thresholdResults = results)
             EchoCard {
                 Text(
-                    if (record != null) "Session Summary (${record.strategyType})" else "Sample Session Summary",
+                    "Session Summary (${record.strategyType})",
                     color = EchoNavy,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(modifier = Modifier.height(6.dp))
+                if (results.isEmpty()) {
+                    Text("This session has no threshold results.", color = EchoTextMuted, fontSize = 13.sp)
+                }
                 results.forEach { r ->
                     Text("${r.ear.clinicalCode} · ${r.frequencyHz} Hz: ${r.thresholdDb} dBFS", color = EchoTextMuted, fontSize = 13.sp)
                 }

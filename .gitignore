@@ -50,3 +50,6 @@ yarn-error.log*
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Local portable toolchain (JDK, Node, Android SDK, caches)
+.tools/

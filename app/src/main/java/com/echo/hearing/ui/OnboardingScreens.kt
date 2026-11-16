@@ -64,7 +64,7 @@ fun OnboardingFlow(
                 onBack = { step = OnboardingStep.WELCOME },
                 onSignInOrRegister = { mode, email ->
                     val derivedName = if (profile.preferredName.isBlank() || profile.preferredName == "Alex Parker") {
-                        email.substringBefore("@").replaceFirstChar { it.uppercase() }.ifBlank { "Alex Parker" }
+                        email.substringBefore("@").replaceFirstChar { it.uppercase() }.trim()
                     } else {
                         profile.preferredName
                     }
@@ -456,7 +456,7 @@ private fun ProfileSetupScreen(
                 onClick = {
                     onContinue(
                         profile.copy(
-                            preferredName = name.ifBlank { "Alex Parker" },
+                            preferredName = name.trim(),
                             ageRange = ageRange,
                             preferredLanguage = language
                         )

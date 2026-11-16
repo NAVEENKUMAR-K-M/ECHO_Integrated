@@ -50,7 +50,8 @@ public:
                 ->setChannelCount(oboe::ChannelCount::Stereo)
                 ->setChannelConversionAllowed(true)
                 ->setFormatConversionAllowed(true)
-                ->setUsage(oboe::Usage::AssistanceAccessibility)
+                // Media usage so the phone volume buttons control the hearing aid loudness.
+                ->setUsage(oboe::Usage::Media)
                 ->setContentType(oboe::ContentType::Speech)
                 ->setDataCallback(this)
                 ->setErrorCallback(this);
